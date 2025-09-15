@@ -42,9 +42,24 @@ app.use(express.json());
 // Initialize OpenAI
 const openai = new OpenAI();
 
-// Define schema for number extraction
+// Helper function to ensure number is within 4-digit limit
+const enforceMaxDigits = (num) => {
+  const absNum = Math.abs(num);
+  if (absNum > 9999) {
+    // For numbers > 9999, take modulo 10000 to keep within 4 digits
+    return num < 0 ? -(absNum % 10000) : absNum % 10000;
+  }
+  return num;
+};
+
+// Define schema for number extraction with 4-digit constraint
 const NumberResponse = z.object({
-  number: z.number()
+  number: z
+    .number()
+    .refine((val) => Math.abs(val) <= 9999, {
+      message: "Number must be 4 digits or less"
+    })
+    .transform(enforceMaxDigits)
 });
 
 // Define schema for suggested questions
@@ -113,7 +128,7 @@ app.post("/process-question", async (req, res) => {
       input: [
         {
           role: "system",
-          content: `Respond with a number that is an answer to the question. VERY IMPORTANT: Always return a valid number that is less than 4 digits. If it's more than 4 digits, truncate it to 4 digits. The current year is ${new Date().getFullYear()}. `
+          content: `Respond with a number that is an answer to the question. CRITICAL CONSTRAINT: The number MUST be between -9999 and 9999 (4 digits maximum). If the actual answer would be larger, provide a rounded, scaled, or modified version that fits within this range. For years, use the last 4 digits. For large quantities, use thousands or abbreviated forms. The current year is ${new Date().getFullYear()}. `
         },
         {
           role: "user",
@@ -127,10 +142,13 @@ app.post("/process-question", async (req, res) => {
 
     const numberResult = response.output_parsed;
 
+    // Apply additional constraint enforcement as backup
+    const constrainedNumber = enforceMaxDigits(numberResult.number);
+
     // Broadcast to all connected WebSocket clients
     const message = JSON.stringify({
       type: "number-update",
-      number: numberResult.number
+      number: constrainedNumber
     });
     wss.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
@@ -140,7 +158,7 @@ app.post("/process-question", async (req, res) => {
 
     res.json({
       success: true,
-      number: numberResult.number
+      number: constrainedNumber
     });
   } catch (error) {
     console.error("Error processing question:", error);
