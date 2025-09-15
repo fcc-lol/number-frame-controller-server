@@ -30,8 +30,10 @@ const wss = new WebSocketServer({
   server,
   verifyClient: (info) => {
     const origin = info.origin;
-    // Allow connections from allowed origins only
-    return !origin || allowedOrigins.includes(origin);
+
+    // Allow missing Origin (for IoT) or allowed domains
+    if (!origin) return true;
+    return allowedOrigins.includes(origin);
   }
 });
 
