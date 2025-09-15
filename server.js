@@ -323,7 +323,9 @@ app.get("/update-suggested-questions-library", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Questions and numbers library updated successfully"
+      message: "Questions and numbers library updated successfully",
+      questionsAdded: cleanedQAPairs.length,
+      totalQuestionsInLibrary: allQuestions.length
     });
   } catch (error) {
     console.error("Error updating suggested questions library:", error);
