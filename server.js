@@ -44,6 +44,146 @@ app.use(express.json());
 // Initialize OpenAI
 const openai = new OpenAI();
 
+// Helper function to process a question and broadcast the result
+async function processQuestionLogic(question) {
+  if (!question) {
+    throw new Error("Question is required");
+  }
+
+  // First check if question exists in library
+  let numberFromLibrary = null;
+  const dataFilepath = path.join(process.cwd(), "data", "library.json");
+
+  try {
+    const libraryData = await fs.readFile(dataFilepath, "utf8");
+    const questionsLibrary = JSON.parse(libraryData);
+
+    // Search for matching question (case insensitive, trimmed)
+    const normalizedQuestion = question.trim().toLowerCase();
+    const matchingEntry = questionsLibrary.find(
+      (entry) => entry.question.trim().toLowerCase() === normalizedQuestion
+    );
+
+    if (matchingEntry) {
+      numberFromLibrary = matchingEntry.number;
+    }
+  } catch (err) {
+    // Library file doesn't exist or is invalid, proceed with GPT
+    console.log("Library file not found or invalid, proceeding with GPT");
+  }
+
+  let constrainedNumber;
+  let numberSource;
+
+  if (numberFromLibrary !== null) {
+    // Use number from library
+    constrainedNumber = enforceMaxDigits(numberFromLibrary);
+    numberSource = "library";
+  } else {
+    // Proceed with GPT as fallback
+    const response = await openai.responses.parse({
+      model: "gpt-4.1-nano",
+      input: [
+        {
+          role: "system",
+          content: `Respond with a number that is an answer to the question. CRITICAL CONSTRAINT: The number MUST be between -9999 and 9999 (4 digits maximum). If the actual answer would be larger, provide a rounded, scaled, or modified version that fits within this range. For years, use the last 4 digits. For large quantities, use thousands or abbreviated forms. The current year is ${new Date().getFullYear()}. `
+        },
+        {
+          role: "user",
+          content: question
+        }
+      ],
+      text: {
+        format: zodTextFormat(NumberResponse, "number_response")
+      }
+    });
+
+    const numberResult = response.output_parsed;
+
+    // Apply additional constraint enforcement as backup
+    constrainedNumber = enforceMaxDigits(numberResult.number);
+    numberSource = "gpt";
+  }
+
+  // If this was a new question (answered by GPT), add it to the library
+  if (numberSource === "gpt") {
+    try {
+      const libraryFilepath = path.join(process.cwd(), "data", "library.json");
+      let existingLibrary = [];
+
+      try {
+        const libraryData = await fs.readFile(libraryFilepath, "utf8");
+        existingLibrary = JSON.parse(libraryData);
+      } catch (err) {
+        // Library file doesn't exist or is invalid, start with empty array
+        existingLibrary = [];
+      }
+
+      // Add the new question-number pair to the library
+      const newEntry = {
+        question: question.trim(),
+        number: constrainedNumber
+      };
+      existingLibrary.push(newEntry);
+
+      // Save updated library
+      await fs.writeFile(
+        libraryFilepath,
+        JSON.stringify(existingLibrary, null, 2),
+        "utf8"
+      );
+      console.log(`Added new question to library: "${question.trim()}"`);
+    } catch (err) {
+      console.error("Error adding question to library:", err);
+      // Don't fail the request if adding to library fails
+    }
+  }
+
+  // Save current question to file
+  const currentQuestionData = {
+    question: question.trim(),
+    number: constrainedNumber,
+    numberSource: numberSource,
+    timestamp: new Date().toISOString()
+  };
+
+  try {
+    const currentQuestionPath = path.join(
+      process.cwd(),
+      "data",
+      "current-question.json"
+    );
+    await fs.writeFile(
+      currentQuestionPath,
+      JSON.stringify(currentQuestionData, null, 2),
+      "utf8"
+    );
+  } catch (err) {
+    console.error("Error saving current question:", err);
+    // Don't fail the request if saving current question fails
+  }
+
+  // Broadcast to all connected WebSocket clients
+  const message = JSON.stringify({
+    type: "number-update",
+    number: constrainedNumber,
+    question: question.trim(),
+    numberSource: numberSource,
+    timestamp: new Date().toISOString()
+  });
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+
+  return {
+    success: true,
+    number: constrainedNumber,
+    numberSource: numberSource
+  };
+}
+
 // Helper function to ensure number is always a positive integer within 4-digit range
 const enforceMaxDigits = (num) => {
   // Convert to positive integer first
@@ -83,7 +223,7 @@ const QAPairsResponse = z.object({
     .array(
       z.object({
         question: z.string(),
-        answer: z.number().transform(enforceMaxDigits)
+        number: z.number().transform(enforceMaxDigits)
       })
     )
     .length(25)
@@ -114,12 +254,12 @@ app.get("/update-suggested-questions-library", async (req, res) => {
       input: [
         {
           role: "system",
-          content: `Generate exactly 25 esoteric and strange questions with their numerical answers. Include questions about history, nature, science, geography, art, and math. CRITICAL CONSTRAINT: Each answer MUST be between -9999 and 9999 (4 digits maximum). If the actual answer would be larger, provide a rounded, scaled, or modified version that fits within this range. For years, use the last 4 digits. For large quantities, use thousands or abbreviated forms. The current year is ${new Date().getFullYear()}. Return both the question and its numerical answer for each pair.`
+          content: `Generate exactly 25 esoteric and strange questions with their numerical answers. Include questions about history, nature, science, geography, art, and math. CRITICAL CONSTRAINT: Each number MUST be between -9999 and 9999 (4 digits maximum). If the actual number would be larger, provide a rounded, scaled, or modified version that fits within this range. For years, use the last 4 digits. For large quantities, use thousands or abbreviated forms. The current year is ${new Date().getFullYear()}. Return both the question and its numerical answer for each pair.`
         },
         {
           role: "user",
           content:
-            "Generate 25 creative question and answer pairs where each answer is a number that fits within 4 digits (-9999 to 9999). Be inventive and think outside the box."
+            "Generate 25 creative question and number pairs where each number fits within 4 digits (-9999 to 9999). Be inventive and think outside the box."
         }
       ],
       temperature: 0.9,
@@ -130,7 +270,7 @@ app.get("/update-suggested-questions-library", async (req, res) => {
 
     const qaPairsResult = response.output_parsed;
 
-    // Clean up questions and ensure answers are within constraints
+    // Clean up questions and ensure numbers are within constraints
     const cleanedQAPairs = qaPairsResult.qaPairs
       .map((pair) => ({
         question: pair.question
@@ -138,7 +278,7 @@ app.get("/update-suggested-questions-library", async (req, res) => {
           .replace(/[,;]+$/, "") // Remove trailing commas or semicolons
           .replace(/\.+$/, "") // Remove trailing periods
           .trim(),
-        answer: enforceMaxDigits(pair.answer)
+        number: enforceMaxDigits(pair.number)
       }))
       .filter((pair) => pair.question.length > 0); // Remove any pairs with empty questions
 
@@ -151,7 +291,7 @@ app.get("/update-suggested-questions-library", async (req, res) => {
     }
 
     // Read existing questions if file exists
-    const filepath = path.join(dataDir, "questions-answers.json");
+    const filepath = path.join(dataDir, "library.json");
     let existingQuestions = [];
 
     try {
@@ -170,7 +310,7 @@ app.get("/update-suggested-questions-library", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Questions and answers library updated successfully"
+      message: "Questions and numbers library updated successfully"
     });
   } catch (error) {
     console.error("Error updating suggested questions library:", error);
@@ -184,11 +324,7 @@ app.get("/update-suggested-questions-library", async (req, res) => {
 app.get("/get-suggested-questions", async (req, res) => {
   try {
     // Read questions from library
-    const dataFilepath = path.join(
-      process.cwd(),
-      "data",
-      "questions-answers.json"
-    );
+    const dataFilepath = path.join(process.cwd(), "data", "library.json");
 
     try {
       const libraryData = await fs.readFile(dataFilepath, "utf8");
@@ -207,7 +343,7 @@ app.get("/get-suggested-questions", async (req, res) => {
       const shuffled = [...questionsLibrary].sort(() => Math.random() - 0.5);
       const randomQuestions = shuffled.slice(0, numberOfQuestions);
 
-      // Extract just the questions (not the answers)
+      // Extract just the questions (not the numbers)
       const questions = randomQuestions.map((item) => item.question);
 
       res.json({
@@ -234,90 +370,87 @@ app.get("/get-suggested-questions", async (req, res) => {
 app.post("/process-question", async (req, res) => {
   try {
     const { question } = req.body;
+    const result = await processQuestionLogic(question);
+    res.json(result);
+  } catch (error) {
+    console.error("Error processing question:", error);
+    res.status(500).json({
+      error: "Failed to process question",
+      message: error.message
+    });
+  }
+});
 
-    if (!question) {
-      return res.status(400).json({ error: "Question is required" });
-    }
-
-    // First check if question exists in library
-    let answerFromLibrary = null;
-    const dataFilepath = path.join(
-      process.cwd(),
-      "data",
-      "questions-answers.json"
-    );
+app.get("/process-random-question", async (req, res) => {
+  try {
+    // Read questions from library
+    const dataFilepath = path.join(process.cwd(), "data", "library.json");
 
     try {
       const libraryData = await fs.readFile(dataFilepath, "utf8");
       const questionsLibrary = JSON.parse(libraryData);
 
-      // Search for matching question (case insensitive, trimmed)
-      const normalizedQuestion = question.trim().toLowerCase();
-      const matchingEntry = questionsLibrary.find(
-        (entry) => entry.question.trim().toLowerCase() === normalizedQuestion
-      );
-
-      if (matchingEntry) {
-        answerFromLibrary = matchingEntry.answer;
+      if (questionsLibrary.length === 0) {
+        return res.status(404).json({
+          error: "No questions available",
+          message:
+            "Library is empty. Use /update-suggested-questions-library to add questions first."
+        });
       }
+
+      // Pick a random question
+      const randomIndex = Math.floor(Math.random() * questionsLibrary.length);
+      const randomQuestion = questionsLibrary[randomIndex].question;
+
+      // Process the random question through the same logic
+      const result = await processQuestionLogic(randomQuestion);
+      res.json(result);
     } catch (err) {
-      // Library file doesn't exist or is invalid, proceed with GPT
-      console.log("Library file not found or invalid, proceeding with GPT");
-    }
-
-    let constrainedNumber;
-    let answerSource;
-
-    if (answerFromLibrary !== null) {
-      // Use answer from library
-      constrainedNumber = enforceMaxDigits(answerFromLibrary);
-      answerSource = "library";
-    } else {
-      // Proceed with GPT as fallback
-      const response = await openai.responses.parse({
-        model: "gpt-4.1-nano",
-        input: [
-          {
-            role: "system",
-            content: `Respond with a number that is an answer to the question. CRITICAL CONSTRAINT: The number MUST be between -9999 and 9999 (4 digits maximum). If the actual answer would be larger, provide a rounded, scaled, or modified version that fits within this range. For years, use the last 4 digits. For large quantities, use thousands or abbreviated forms. The current year is ${new Date().getFullYear()}. `
-          },
-          {
-            role: "user",
-            content: question
-          }
-        ],
-        text: {
-          format: zodTextFormat(NumberResponse, "number_response")
-        }
+      return res.status(404).json({
+        error: "Library not found",
+        message:
+          "Questions library not found. Use /update-suggested-questions-library to create it first."
       });
-
-      const numberResult = response.output_parsed;
-
-      // Apply additional constraint enforcement as backup
-      constrainedNumber = enforceMaxDigits(numberResult.number);
-      answerSource = "gpt";
     }
-
-    // Broadcast to all connected WebSocket clients
-    const message = JSON.stringify({
-      type: "number-update",
-      number: constrainedNumber
-    });
-    wss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
-    });
-
-    res.json({
-      success: true,
-      number: constrainedNumber,
-      answerSource: answerSource
-    });
   } catch (error) {
-    console.error("Error processing question:", error);
+    console.error("Error processing random question:", error);
     res.status(500).json({
-      error: "Failed to process question",
+      error: "Failed to process random question",
+      message: error.message
+    });
+  }
+});
+
+app.get("/get-current-question", async (req, res) => {
+  try {
+    const currentQuestionPath = path.join(
+      process.cwd(),
+      "data",
+      "current-question.json"
+    );
+
+    try {
+      const currentQuestionData = await fs.readFile(
+        currentQuestionPath,
+        "utf8"
+      );
+      const parsedData = JSON.parse(currentQuestionData);
+
+      res.json({
+        success: true,
+        ...parsedData
+      });
+    } catch (err) {
+      return res.status(404).json({
+        error: "No current question",
+        message:
+          "No question has been processed yet. Use /process-question to process a question first."
+      });
+    }
+  } catch (error) {
+    console.error("Error getting current question:", error);
+    res.status(500).json({
+      error: "Failed to get current question",
       message: error.message
     });
   }
