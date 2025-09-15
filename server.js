@@ -26,16 +26,7 @@ const corsOriginHandler = (origin, callback) => {
 
 // Create HTTP server and WebSocket server
 const server = createServer(app);
-const wss = new WebSocketServer({
-  server,
-  verifyClient: (info) => {
-    const origin = info.origin;
-
-    // Allow missing Origin (for IoT) or allowed domains
-    if (!origin) return true;
-    return allowedOrigins.includes(origin);
-  }
-});
+const wss = new WebSocketServer({ server });
 
 // Express CORS configuration
 const corsOptions = {
