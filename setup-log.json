@@ -1,0 +1,9 @@
+{
+  "service_id": "number-frame-server",
+  "service_name": "Number Frame Server",
+  "domain": "https://number-frame-server.noshado.ws",
+  "host": "localhost",
+  "port": "3116",
+  "author": "leo",
+  "created_on": "Mon 15 Sep 2025 02:01:59 PM EDT"
+}
