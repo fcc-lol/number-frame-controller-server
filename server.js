@@ -105,7 +105,7 @@ async function processQuestionLogic(question) {
     numberSource = "gpt";
   }
 
-  // If this was a new question (answered by GPT), add it to the library
+  // If this was a new question (answered by GPT), add it to the library (if under limit)
   if (numberSource === "gpt") {
     try {
       const libraryFilepath = path.join(process.cwd(), "data", "library.json");
@@ -119,20 +119,33 @@ async function processQuestionLogic(question) {
         existingLibrary = [];
       }
 
-      // Add the new question-number pair to the library
-      const newEntry = {
-        question: question.trim(),
-        number: constrainedNumber
-      };
-      existingLibrary.push(newEntry);
+      // Check if library has reached the maximum size
+      if (existingLibrary.length >= 1000) {
+        console.log(
+          `Library at maximum size (${
+            existingLibrary.length
+          } questions). Not adding: "${question.trim()}"`
+        );
+      } else {
+        // Add the new question-number pair to the library
+        const newEntry = {
+          question: question.trim(),
+          number: constrainedNumber
+        };
+        existingLibrary.push(newEntry);
 
-      // Save updated library
-      await fs.writeFile(
-        libraryFilepath,
-        JSON.stringify(existingLibrary, null, 2),
-        "utf8"
-      );
-      console.log(`Added new question to library: "${question.trim()}"`);
+        // Save updated library
+        await fs.writeFile(
+          libraryFilepath,
+          JSON.stringify(existingLibrary, null, 2),
+          "utf8"
+        );
+        console.log(
+          `Added new question to library (${
+            existingLibrary.length
+          }/1000): "${question.trim()}"`
+        );
+      }
     } catch (err) {
       console.error("Error adding question to library:", err);
       // Don't fail the request if adding to library fails
